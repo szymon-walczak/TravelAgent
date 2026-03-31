@@ -3,7 +3,7 @@ from typing import List, Dict
 from agent import run_travel_agent
 
 # Shared constants to match agent.py
-FUEL_PRICE_PLN = 6.50
+FUEL_PRICE_PLN = 7.50
 
 TEST_CASES = [
     {

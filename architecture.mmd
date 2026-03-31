@@ -1,0 +1,182 @@
+---
+title: Travel Agent – System Architecture
+---
+
+%%{init: {"theme": "default"}}%%
+
+graph TD
+    subgraph Entry["Entry Points"]
+        CLI[cli.py\nInteractive CLI]
+        ASYNC[run_travel_agent\nasync]
+        SYNC[run_travel_agent_sync\nsync]
+    end
+
+    subgraph Agent["Agent Layer  ·  agent.py"]
+        TA["🤖 travel_agent\npydantic-ai Agent\nGemini 2.5-flash-lite"]
+    end
+
+    subgraph Retry["Retry Middleware  ·  tools/retries.py"]
+        RW[invoke_with_retry\ninvoke_with_retry_async\nmax 3 attempts · 2 s delay]
+    end
+
+    subgraph Tools["Tools  ·  tools/"]
+        T1[get_detailed_routes\nroutes.py]
+        T2[get_pkp_ticket_price\nrag.py]
+        T3[get_vehicle_consumption\nrag.py]
+        T4[verify_recommendation\nvalidation.py]
+        T5[update_all_knowledge\nknowledge.py]
+    end
+
+    subgraph RAG["RAG / LLM Layer"]
+        LC["LangChain\nRetrieval Chain"]
+        GEMINI_LC["ChatGoogleGenerativeAI\nGemini 2.5-flash-lite"]
+    end
+
+    subgraph VectorDBs["Vector Stores  ·  ChromaDB"]
+        VT[("chroma_db-train\nPKP price lists\n(PDF chunks)")]
+        VC[("chroma_db-vehicles\nCar fuel data\n(JSON metadata)")]
+    end
+
+    subgraph Embed["Embeddings"]
+        HF["HuggingFaceEmbeddings\nall-MiniLM-L6-v2"]
+    end
+
+    subgraph External["External APIs"]
+        SERP["SerpApi\nGoogle Maps Directions"]
+        GAPI["Google Gemini API"]
+    end
+
+    subgraph Models["Pydantic Models  ·  models/"]
+        TR["TravelResponse\n  options: TravelOption[]\n  recommendation: str\n  alternatives: str[]"]
+        TO["TravelOption\n  mode · cost · details"]
+        VS["VehicleSpec\n  model · l_100km_*\n  source"]
+    end
+
+    subgraph Config["Config  ·  config/settings.py"]
+        CFG["GEMINI_MODEL_NAME\nFUEL_PRICE_PLN = 7.50\nMAX_MODEL_RETRIES = 3\nvector_train_db\nvector_car_db"]
+    end
+
+    %% Entry → Agent (via retry)
+    CLI -->|query string| RW
+    ASYNC -->|query string| RW
+    SYNC -->|query string| RW
+    RW -->|retried call| TA
+
+    %% Agent → Tools
+    TA -->|tool call| T1
+    TA -->|tool call| T2
+    TA -->|tool call| T3
+    TA -->|MUST call| T4
+    TA -->|tool call| T5
+
+    %% Tools → External / DBs
+    T1 -->|HTTP request| SERP
+    T2 -->|RAG query| LC
+    T3 -->|similarity_search k=1| VC
+    T3 -->|fallback LLM| GEMINI_LC
+    T5 -->|add_documents| VT
+    T5 -->|add_documents batches| VC
+
+    %% RAG internals
+    LC -->|retrieve k=3| VT
+    LC -->|generate answer| GEMINI_LC
+    GEMINI_LC -->|API call| GAPI
+    TA -->|API call| GAPI
+
+    %% Embeddings
+    HF -.->|embed queries & docs| VT
+    HF -.->|embed queries & docs| VC
+
+    %% Output models
+    TA -->|structured output| TR
+    TR --> TO
+    T3 -->|returns| VS
+    T4 -->|validates| TR
+
+    %% Config
+    CFG -.->|settings| TA
+    CFG -.->|db handles| T2
+    CFG -.->|db handles| T3
+    CFG -.->|db handles| T5
+    CFG -.->|FUEL_PRICE_PLN| T4
+
+    classDef entryStyle fill:#dbeafe,stroke:#3b82f6,color:#1e3a8a
+    classDef agentStyle fill:#fef3c7,stroke:#f59e0b,color:#78350f
+    classDef toolStyle fill:#d1fae5,stroke:#10b981,color:#064e3b
+    classDef dbStyle fill:#ede9fe,stroke:#7c3aed,color:#2e1065
+    classDef extStyle fill:#fee2e2,stroke:#ef4444,color:#7f1d1d
+    classDef modelStyle fill:#f0fdf4,stroke:#22c55e,color:#14532d
+    classDef configStyle fill:#f1f5f9,stroke:#94a3b8,color:#334155
+    classDef retryStyle fill:#fdf4ff,stroke:#a855f7,color:#4a044e
+
+    class CLI,ASYNC,SYNC entryStyle
+    class TA agentStyle
+    class T1,T2,T3,T4,T5 toolStyle
+    class VT,VC dbStyle
+    class SERP,GAPI extStyle
+    class TR,TO,VS modelStyle
+    class CFG,HF,EMBED configStyle
+    class RW retryStyle
+
+
+
+sequenceDiagram
+    actor User
+    participant CLI as cli.py
+    participant Retry as RetryMiddleware
+    participant Agent as travel_agent<br/>(pydantic-ai)
+    participant Gemini as Gemini 2.5-flash-lite<br/>(Google API)
+    participant Routes as get_detailed_routes
+    participant SerpApi as SerpApi<br/>(Google Maps)
+    participant PKP as get_pkp_ticket_price
+    participant RAGChain as LangChain RAG Chain
+    participant TrainDB as ChromaDB<br/>chroma_db-train
+    participant CarTool as get_vehicle_consumption
+    participant CarDB as ChromaDB<br/>chroma_db-vehicles
+    participant Verify as verify_recommendation
+
+    User->>CLI: "Compare car vs train from Warsaw to Kraków for 2 people"
+    CLI->>Retry: invoke_with_retry_async(travel_agent.run)
+    Retry->>Agent: run(query)
+    Agent->>Gemini: system_prompt + query
+
+    Note over Agent,Gemini: Agent decides which tools to call
+
+    Agent->>Routes: get_detailed_routes("Warsaw", "Kraków")
+    Routes->>SerpApi: GET google_maps_directions
+    SerpApi-->>Routes: driving & transit routes + distances
+    Routes-->>Agent: [{mode, dist_meters, duration, formatted_distance}, ...]
+
+    Agent->>PKP: get_pkp_ticket_price(distance_km)
+    PKP->>RAGChain: invoke({"input": "price for ~300km?"})
+    RAGChain->>TrainDB: similarity_search k=3
+    TrainDB-->>RAGChain: relevant price chunks
+    RAGChain->>Gemini: generate answer from chunks
+    Gemini-->>RAGChain: "~49 PLN"
+    RAGChain-->>PKP: answer string
+    PKP-->>Agent: "~49 PLN per person"
+
+    Agent->>CarTool: get_vehicle_consumption("Toyota Corolla 2020")
+    CarTool->>CarDB: similarity_search k=1
+    alt car found in ChromaDB
+        CarDB-->>CarTool: VehicleSpec (l_100km_*)
+    else not found – LLM fallback
+        CarTool->>Gemini: estimate fuel consumption
+        Gemini-->>CarTool: VehicleSpec (source: LLM Estimation)
+    end
+    CarTool-->>Agent: VehicleSpec
+
+    Note over Agent,Gemini: Agent calculates costs, drafts TravelResponse
+
+    Agent->>Verify: verify_recommendation(raw_routes, TravelResponse)
+    Note over Verify: Validates car cost within 2–20 L/100km range<br/>Validates train cost vs distance norms
+    alt verification passed
+        Verify-->>Agent: "✅ Verification Passed."
+    else out of bounds
+        Verify-->>Agent: "⚠️ Verification Warning: ..."
+        Agent->>Gemini: recalculate with warning context
+    end
+
+    Agent-->>Retry: TravelResponse (structured output)
+    Retry-->>CLI: TravelResponse
+    CLI-->>User: Recommendation + cost breakdown
