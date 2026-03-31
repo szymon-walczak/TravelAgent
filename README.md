@@ -16,7 +16,7 @@ Added 3 new chunks to the train database. | Loaded 16753 cars to Chroma in 4 bat
 --- PRICE BREAKDOWN ---
 * Car        |   373.86 PLN | 597 km, 6 hr 5 min
 * Train      |    101.00 PLN | 844 km, 9 hr 37 min````
-
+````
 ## 🧭 System Overview
 
 The system is an **AI Agentic Workflow** powered by Pydantic-AI. A Gemini 2.5-flash-lite agent acts as a reasoning engine, dynamically choosing which tools to call based on the user's query. All agent calls are wrapped in a retry middleware that handles transient model errors.
